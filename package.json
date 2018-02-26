@@ -12,5 +12,8 @@
   },
   "scripts": {
     "install": "node build.js"
+  },
+  "dependencies": {
+    "nan": "^2.9.2"
   }
 }

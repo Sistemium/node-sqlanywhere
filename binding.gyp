@@ -9,7 +9,10 @@
 		   "src/utils_v0_10.cpp",
 		   "src/sacapidll.cpp", ],
 
-      "include_dirs": [ "src/h", ],
+      "include_dirs": [
+        "src/h",
+        "<!(node -e \"require('nan')\")",
+      ],
       
       'configurations': {
 	'Release': {
