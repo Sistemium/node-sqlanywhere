@@ -118,6 +118,8 @@ void callBack( std::string *		str,
 	TryCatch try_catch;
 	Nan::Callback *cb = new Nan::Callback(local_callback);
 	cb->Call(argc, argv);
+    callback.Reset();
+
 	if( try_catch.HasCaught()) {
 	    node::FatalException( isolate, try_catch );
 	}
@@ -140,6 +142,8 @@ void callBack( std::string *		str,
     Local<Value> local_result = Local<Value>::New( isolate, Result );
 
     callBack( str, callback, local_result, callback_required );
+    
+    callback.Reset();
 }
 
 void callBack( std::string *		str,
