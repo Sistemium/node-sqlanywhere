@@ -152,4 +152,16 @@ class StmtObject : public Napi::ObjectWrap<StmtObject>
     Connection				*connection;
     /// @internal
     std::atomic<a_sqlany_stmt *>	sqlany_stmt;
+    /// @internal
+    /// The SQL text, which wide_stmt is prepared from.
+    std::string				sql;
+    /// @internal
+    /// A second handle of the statement for executions with several rows,
+    /// prepared on first use and never reset. sqlany_reset() leaves room for
+    /// one row in the SQLDA, and sqlany_set_batch_size() only restores it
+    /// when it has to grow the SQLDA, so a handle that is reset can only
+    /// execute more rows than in any earlier execution (error -182
+    /// otherwise). Single-row executions need the reset, so they use
+    /// sqlany_stmt. Only used while holding the connection mutex.
+    a_sqlany_stmt			*wide_stmt;
 };

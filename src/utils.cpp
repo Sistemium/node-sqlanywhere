@@ -510,6 +510,7 @@ StmtObject::StmtObject( const Napi::CallbackInfo &info )
     : Napi::ObjectWrap<StmtObject>( info )
     , connection( NULL )
     , sqlany_stmt( NULL )
+    , wide_stmt( NULL )
 {
 }
 
@@ -546,6 +547,10 @@ void StmtObject::cleanup( void )
     if( sqlany_stmt != NULL ) {
 	api.sqlany_free_stmt( sqlany_stmt );
 	sqlany_stmt = NULL;
+    }
+    if( wide_stmt != NULL ) {
+	api.sqlany_free_stmt( wide_stmt );
+	wide_stmt = NULL;
     }
 }
 

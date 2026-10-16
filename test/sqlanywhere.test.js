@@ -153,17 +153,25 @@ describe('synchronous calls', opts, () => {
 	conn.exec('CREATE TABLE #prep (id INT PRIMARY KEY, s VARCHAR(20))');
 	const ins = conn.prepare('INSERT INTO #prep VALUES (?, ?)');
 	assert.strictEqual(ins.exec([[1, 'a'], [2, 'b']]), 2);
-	// DBCAPI only executes several rows again if there are more of them than
-	// before; as many rows must fail rather than insert just the first one
-	assert.throws(() => ins.exec([[4, 'd'], [5, 'e']]), /^Error: Code: -182 Msg: /);
-	// a single row after a wide insert must not reuse the batch size
-	assert.strictEqual(ins.exec([3, 'c']), 1);
-	assert.strictEqual(ins.exec([[4, 'd'], [5, 'e'], [6, 'f']]), 3);
+	// as many rows again, and a single row in between, which must not
+	// reuse the batch size
+	assert.strictEqual(ins.exec([[3, 'c'], [4, 'd']]), 2);
+	assert.strictEqual(ins.exec([5, 'e']), 1);
+	assert.strictEqual(ins.exec([[6, 'f'], [7, 'g'], [8, 'h']]), 3);
+	assert.strictEqual(ins.exec([[9, 'i'], [10, 'j']]), 2);
+	// a failing execution inserts nothing and leaves the statement usable
+	assert.throws(() => ins.exec([[11, 'k'], [1, 'x']]), /^Error: Code: -193 Msg: /);
+	assert.strictEqual(ins.exec([[11, 'k'], [12, 'l']]), 2);
+	// values missing from the rows are NULL, as with conn.exec(), rather
+	// than the values of an earlier execution
+	assert.strictEqual(ins.exec([[13], [14]]), 2);
 	ins.drop();
+	assert.deepStrictEqual(conn.exec('SELECT id, s FROM #prep ORDER BY id'),
+			       [...'abcdefghijkl', null, null].map((s, i) => ({ id: i + 1, s })));
 
 	const sel = conn.prepare('SELECT id, s FROM #prep WHERE id >= ? ORDER BY id');
-	assert.deepStrictEqual(sel.exec([5]), [{ id: 5, s: 'e' }, { id: 6, s: 'f' }]);
-	assert.deepStrictEqual(sel.exec([6]), [{ id: 6, s: 'f' }]);
+	assert.deepStrictEqual(sel.exec([12]), [{ id: 12, s: 'l' }, { id: 13, s: null }, { id: 14, s: null }]);
+	assert.deepStrictEqual(sel.exec([14]), [{ id: 14, s: null }]);
 	assert.throws(() => sel.exec(), /^Error: Code: -188 Msg: /);
 	sel.drop();
 	assert.throws(() => sel.exec([1]), /^Error: Code: -2001 Msg: Invalid Object$/);
