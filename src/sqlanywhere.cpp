@@ -78,16 +78,24 @@ class ExecuteTask : public Task {
 
   private:
     void run( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt ) {
+	// The server takes a parameter left unbound as NULL, but then keeps
+	// it NULL in later executions on the connection, even of other
+	// statements, and can crash. So missing values are bound as NULL.
+	// This also binds every input parameter of the wide handle again,
+	// which is not reset and would otherwise keep bindings to freed
+	// buffers.
+	int num_params = api.sqlany_num_params( sqlany_stmt );
+	if( num_params > 0 ) {
+	    binds.addNulls( num_params );
+	}
+
 	// DBCAPI fails to execute several rows of a statement with a result set
 	bool wide = binds.num_rows > 1 && api.sqlany_num_cols( sqlany_stmt ) == 0;
 	if( wide && binds.mixed_nulls ) {
 	    runRowByRow( conn, sqlany_stmt );
 	    return;
 	}
-	// The wide handle is not reset, so a parameter that isn't bound again
-	// would keep its binding to the buffers of an earlier execution
-	if( wide && stmt_obj != NULL &&
-	    binds.params.size() >= (size_t)api.sqlany_num_params( sqlany_stmt ) ) {
+	if( wide && stmt_obj != NULL ) {
 	    runWide( conn );
 	    return;
 	}
@@ -182,6 +190,13 @@ class ExecuteTask : public Task {
 
 	    if( !api.sqlany_describe_bind_param( sqlany_stmt, i, &param ) ) {
 		return false;
+	    }
+
+	    // DBCAPI would write the output of a procedure parameter into the
+	    // buffer of the NULL added for it, which has none, so such a
+	    // parameter is left unbound when it has no value
+	    if( binds.isAddedNull( i ) && param.direction != DD_INPUT ) {
+		continue;
 	    }
 
 	    param.value = binds.rowValue( i, first );

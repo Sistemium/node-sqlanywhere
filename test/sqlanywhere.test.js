@@ -172,12 +172,45 @@ describe('synchronous calls', opts, () => {
 	const sel = conn.prepare('SELECT id, s FROM #prep WHERE id >= ? ORDER BY id');
 	assert.deepStrictEqual(sel.exec([12]), [{ id: 12, s: 'l' }, { id: 13, s: null }, { id: 14, s: null }]);
 	assert.deepStrictEqual(sel.exec([14]), [{ id: 14, s: null }]);
-	assert.throws(() => sel.exec(), /^Error: Code: -188 Msg: /);
+	assert.deepStrictEqual(sel.exec(), []); // id >= NULL
 	sel.drop();
 	assert.throws(() => sel.exec([1]), /^Error: Code: -2001 Msg: Invalid Object$/);
 	sel.drop(); // dropping twice is harmless
 
 	assert.throws(() => conn.prepare('SELEC 1'), /^Error: Code: -265 Msg: /);
+    });
+
+    test('missing values are bound as NULL', () => {
+	// The server takes a parameter left unbound as NULL, but then kept it
+	// NULL in later executions on the connection, also of other INSERT
+	// statements into the table, and the fourth execution crashed it
+	conn.exec('CREATE TABLE #miss (id INT PRIMARY KEY, s VARCHAR(20) NULL, d DOUBLE NULL)');
+	const ins = conn.prepare('INSERT INTO #miss VALUES (?, ?, ?)');
+	assert.strictEqual(ins.exec([1]), 1);
+	assert.strictEqual(ins.exec([2, 'b', 2.5]), 1);
+	assert.strictEqual(ins.exec([[3], [4]]), 2);
+	assert.strictEqual(ins.exec([[5, 'e', 5.5], [6, 'f', 6.5], [7, 'g', 7.5]]), 3);
+	// executed row by row, as s mixes NULL and other values
+	assert.strictEqual(ins.exec([[8, null], [9, 'i']]), 2);
+	ins.drop();
+	assert.strictEqual(conn.exec('INSERT INTO #miss VALUES (?, ?, ?)', [10, 'j']), 1);
+	assert.strictEqual(conn.exec('INSERT INTO #miss (d, s, id) VALUES (?, ?, ?)', [11.5, 'k', 11]), 1);
+	assert.strictEqual(conn.exec('INSERT INTO #miss (id, s) VALUES (12, ?)'), 1);
+	assert.strictEqual(conn.exec('INSERT INTO #miss (id, s) VALUES (13, ?)', ['m']), 1);
+	const rows = [[1], [2, 'b', 2.5], [3], [4], [5, 'e', 5.5], [6, 'f', 6.5], [7, 'g', 7.5],
+		      [8], [9, 'i'], [10, 'j'], [11, 'k', 11.5], [12], [13, 'm']];
+	assert.deepStrictEqual(conn.exec('SELECT * FROM #miss ORDER BY id'),
+			       rows.map(([id, s = null, d = null]) => ({ id, s, d })));
+
+	assert.deepStrictEqual(conn.exec('SELECT CAST(? AS INT) AS a, CAST(? AS VARCHAR(5)) AS b', [1]),
+			       [{ a: 1, b: null }]);
+	assert.deepStrictEqual(conn.exec('SELECT CAST(? AS INT) AS a'), [{ a: null }]);
+
+	// A parameter that returns output stays unbound, as DBCAPI would
+	// write the output into the buffer of the NULL
+	conn.exec('CREATE OR REPLACE PROCEDURE node_test_out(IN a INT, OUT b INT) BEGIN SET b = a * 2 END');
+	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [1]), undefined);
+	conn.exec('DROP PROCEDURE node_test_out');
     });
 
     test('multiple result sets', () => {
