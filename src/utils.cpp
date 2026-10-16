@@ -213,6 +213,28 @@ bool BindParams::parseWide( Napi::Array rows )
     return true;
 }
 
+void BindParams::addNulls( unsigned num_params )
+/**********************************************/
+{
+    num_parsed = params.size();
+    while( params.size() < num_params ) {
+	// Laid out as a parsed NULL, or as a column of NULLs for several rows
+	a_sqlany_bind_param param;
+	Column *col = addColumn( param );
+	col->nulls.resize( num_rows, true );
+	param.value.type = A_STRING;
+	param.value.is_null = col->nulls.data();
+	if( num_rows > 1 ) {
+	    col->ptrs.resize( num_rows, NULL );
+	    col->lens.resize( num_rows, 0 );
+	    param.value.buffer = (char *)col->ptrs.data();
+	    param.value.length = col->lens.data();
+	    param.value.is_address = true;
+	}
+	params.push_back( param );
+    }
+}
+
 a_sqlany_data_value BindParams::rowValue( unsigned i, unsigned first ) const
 /**************************************************************************/
 {
