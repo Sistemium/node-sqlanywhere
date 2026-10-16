@@ -9,9 +9,13 @@ npm install sqlanywhere
 ```
 #### Prerequisites
 This driver communicates with the native SQL Anywhere libraries, and thus requires
-native compilation. Native compilation is managed by [`node-gyp`](https://github.com/TooTallNate/node-gyp/). Please see that project for additional prerequisites including Python 2.7, and C/C++ tool chain.
+native compilation. Native compilation is managed by [`node-gyp`](https://github.com/nodejs/node-gyp/). Please see that project for additional prerequisites including Python 3, and C/C++ tool chain.
 
-The official version hosted on NPM includes precompiled libraries for Windows (64-bit).
+The module is compiled by the package's install script. Newer npm versions ask you to approve dependency install scripts; allow this one with `npm install-scripts approve sqlanywhere`.
+
+Since version 2.0.0 the driver is built on [Node-API](https://nodejs.org/api/n-api.html), so a compiled module keeps working with newer Node.js versions without being rebuilt.
+
+At run time the driver loads the SQL Anywhere client library `libdbcapi_r.so` (Linux), `libdbcapi.dylib` (macOS) or `dbcapi.dll` (Windows). Run `sa_config.sh` from the SQL Anywhere installation (or set `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` yourself) so that it can be found. The library must match the architecture of the `node` binary: SQL Anywhere 17 for macOS is x86_64 only, so on Apple silicon use an x64 build of Node.js (it runs under Rosetta).
 
 Versions supported:
 
@@ -21,7 +25,16 @@ Versions supported:
 <tr><td>1.0.9</td><td>6.x, 7.x</td></tr>
 <tr><td>1.0.19</td><td>8.x</td></tr>
 <tr><td>1.0.22</td><td>9.x</td></tr>
+<tr><td>2.0.0</td><td>18 and later</td></tr>
 </table>
+
+#### Running the tests
+The tests need a running SQL Anywhere server:
+```
+dbsrv17 -n node_test -x "tcpip(port=2638)" demo.db
+SQLANY_TEST_CONN="Host=localhost:2638;ServerName=node_test;UID=DBA;PWD=sql" node --test test/*.test.js
+```
+On macOS run `node --test` directly rather than `npm test`: npm starts scripts with `/bin/sh`, which drops `DYLD_LIBRARY_PATH`.
 
 ## Getting Started
 
@@ -149,7 +162,7 @@ conn.exec("INSERT INTO Test VALUES ( ?, ? )", [ [1, 10], [2, 20], [3, 30] ], fun
 });
 ```
 
-When using wide statements, each array must have the same number of elements and the type of the values must be the same in each row.
+When using wide statements, each array must have the same number of elements and the type of the values must be the same in each row. A column can be NULL in every row, but DBCAPI rejects a column that mixes NULL and non-NULL values (error -700, "SQLDA fields inconsistent for a multi-row SQLDA"); insert such rows one at a time.
 
 ## Prepared Statement Execution
 #### Prepare a Statement

@@ -1,0 +1,306 @@
+// Integration tests. They need a running SQL Anywhere server, for example:
+//
+//   dbsrv17 -n node_test -x "tcpip(port=2638)" demo.db
+//   SQLANY_TEST_CONN="Host=localhost:2638;ServerName=node_test;UID=DBA;PWD=sql" npm test
+//
+// DBCAPI must be loadable: source sa_config.sh, or point SQLANY_API_DLL at
+// libdbcapi_r.so / libdbcapi_r.dylib.
+'use strict';
+
+const { describe, test, before, after } = require('node:test');
+const assert = require('node:assert');
+const { promisify } = require('node:util');
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
+const sa = require('..');
+
+const CONN = process.env.SQLANY_TEST_CONN;
+const opts = { skip: CONN ? false : 'set SQLANY_TEST_CONN to run' };
+
+// Runs script in a separate node process with the driver as `sa`
+function runScript(script, flags = []) {
+    const prelude = `const sa = require(${JSON.stringify(path.join(__dirname, '..'))});\n` +
+	`const CONN = ${JSON.stringify(CONN)};\n`;
+    return spawnSync(process.execPath, [...flags, '-e', prelude + script], { encoding: 'utf8' });
+}
+
+describe('synchronous calls', opts, () => {
+    let conn;
+
+    before(() => {
+	conn = sa.createConnection(CONN);
+	conn.connect();
+    });
+
+    after(() => conn.disconnect());
+
+    test('connect and disconnect', () => {
+	const c = sa.createConnection();
+	assert.strictEqual(c.connected(), false);
+	c.connect(CONN);
+	assert.strictEqual(c.connected(), true);
+	assert.throws(() => c.connect(CONN), /^Error: Code: -2003 Msg: Already Connected$/);
+	c.close();
+	assert.strictEqual(c.connected(), false);
+	c.disconnect(); // not an error when already disconnected
+    });
+
+    test('connection parameters are combined', () => {
+	const params = Object.fromEntries(CONN.split(';').map(p => p.split('=')));
+	const c = sa.createConnection({ CharSet: 'UTF-8' });
+	c.connect(params);
+	assert.deepStrictEqual(c.exec('SELECT 1 AS x'), [{ x: 1 }]);
+	c.disconnect();
+	assert.throws(() => sa.createConnection().connect(CONN + ';PWD=wrong-password'),
+		      /^Error: Code: -103 Msg: /);
+    });
+
+    test('column types', () => {
+	const rows = conn.exec(`SELECT CAST(-1 AS BIGINT) a, CAST(2 AS UNSIGNED BIGINT) b,
+	    CAST(-3 AS SMALLINT) c, CAST(4 AS TINYINT) d, CAST(1 AS BIT) e, CAST(1.25 AS REAL) f,
+	    CAST(12.345 AS NUMERIC(10,3)) g, DATE('2024-01-02') h,
+	    CAST('2024-01-02 03:04:05.123' AS TIMESTAMP) i, CAST(4000000000 AS UNSIGNED INT) j,
+	    CAST(0x00ff10 AS BINARY(3)) k, CAST('ünïcödé ✓' AS NVARCHAR(20)) l, '' m, CAST(NULL AS INT) n`);
+	assert.deepStrictEqual(rows, [{
+	    a: -1, b: 2, c: -3, d: 4, e: 1, f: 1.25, g: '12.345', h: '2024-01-02',
+	    i: '2024-01-02 03:04:05.123', j: 4000000000, k: Buffer.from([0, 0xff, 0x10]),
+	    l: 'ünïcödé ✓', m: '', n: null,
+	}]);
+    });
+
+    test('rows that only hold NULL are returned', () => {
+	assert.deepStrictEqual(conn.exec('SELECT NULL AS a, NULL AS b'), [{ a: null, b: null }]);
+	assert.deepStrictEqual(
+	    conn.exec('SELECT CASE WHEN row_num = 2 THEN 1 END AS a FROM sa_rowgenerator(1, 3) ORDER BY row_num'),
+	    [{ a: null }, { a: 1 }, { a: null }]);
+    });
+
+    test('large result set', () => {
+	const rows = conn.exec('SELECT row_num, CAST(row_num AS VARCHAR(10)) s FROM sa_rowgenerator(1, 50000) ORDER BY row_num');
+	assert.strictEqual(rows.length, 50000);
+	assert.deepStrictEqual(rows[49999], { row_num: 50000, s: '50000' });
+    });
+
+    test('bind parameters', () => {
+	const rows = conn.exec(`SELECT CAST(? AS INT) i, CAST(? AS DOUBLE) d, CAST(? AS DOUBLE) big,
+	    CAST(? AS LONG NVARCHAR) s, CAST(? AS LONG BINARY) b, CAST(? AS VARCHAR(10)) n,
+	    CAST(? AS LONG BINARY) empty_b, CAST(? AS VARCHAR(5)) empty_s`,
+	    [42, 1.5, 3000000000, 'привет', Buffer.from([1, 2, 3]), null, Buffer.alloc(0), '']);
+	assert.deepStrictEqual(rows, [{
+	    i: 42, d: 1.5, big: 3000000000, s: 'привет', b: Buffer.from([1, 2, 3]), n: null,
+	    empty_b: Buffer.alloc(0), empty_s: '',
+	}]);
+	assert.deepStrictEqual(conn.exec('SELECT 1 AS x', []), [{ x: 1 }]);
+    });
+
+    test('unsupported bind values', () => {
+	for (const value of [true, undefined, {}, () => 1]) {
+	    assert.throws(() => conn.exec('SELECT ? AS x', [value]),
+			  /^Error: Code: -2006 Msg: Can not bind parameter\(s\)$/);
+	}
+    });
+
+    test('insert, update and delete', () => {
+	conn.exec('CREATE TABLE #dml (id INT PRIMARY KEY, s VARCHAR(20) NULL, b LONG BINARY NULL)');
+	assert.strictEqual(conn.exec('INSERT INTO #dml VALUES (?, ?, ?)', [1, 'one', Buffer.from('1')]), 1);
+	assert.strictEqual(
+	    conn.exec('INSERT INTO #dml VALUES (?, ?, ?)',
+		      [[2, 'two', Buffer.from('2')], [3, 'three', Buffer.alloc(0)], [4, '', Buffer.from('4')]]),
+	    3);
+	assert.strictEqual(conn.exec('INSERT INTO #dml (id, s) VALUES (?, ?)', [[5, null], [6, null]]), 2);
+	assert.throws(() => conn.exec('INSERT INTO #dml (id, s) VALUES (?, ?)', [[7, 'x'], [8, 9]]),
+		      /Code: -2006/);
+	assert.strictEqual(conn.exec('UPDATE #dml SET s = ? WHERE id > ?', ['x', 3]), 3);
+	// No affected rows gives undefined, as in earlier versions
+	assert.strictEqual(conn.exec('UPDATE #dml SET s = ? WHERE id > ?', ['x', 100]), undefined);
+	assert.strictEqual(conn.exec('DELETE FROM #dml WHERE id = 6'), 1);
+	assert.deepStrictEqual(conn.exec('SELECT id, s FROM #dml WHERE id <= 3 ORDER BY id'),
+			       [{ id: 1, s: 'one' }, { id: 2, s: 'two' }, { id: 3, s: 'three' }]);
+	assert.throws(() => conn.exec('INSERT INTO #dml (id) VALUES (1)'), /^Error: Code: -193 Msg: /);
+    });
+
+    test('prepared statements', () => {
+	conn.exec('CREATE TABLE #prep (id INT PRIMARY KEY, s VARCHAR(20))');
+	const ins = conn.prepare('INSERT INTO #prep VALUES (?, ?)');
+	assert.strictEqual(ins.exec([[1, 'a'], [2, 'b']]), 2);
+	// a single row after a wide insert must not reuse the batch size
+	assert.strictEqual(ins.exec([3, 'c']), 1);
+	ins.drop();
+
+	const sel = conn.prepare('SELECT id, s FROM #prep WHERE id >= ? ORDER BY id');
+	assert.deepStrictEqual(sel.exec([2]), [{ id: 2, s: 'b' }, { id: 3, s: 'c' }]);
+	assert.deepStrictEqual(sel.exec([3]), [{ id: 3, s: 'c' }]);
+	assert.throws(() => sel.exec(), /^Error: Code: -188 Msg: /);
+	sel.drop();
+	assert.throws(() => sel.exec([1]), /^Error: Code: -2001 Msg: Invalid Object$/);
+	sel.drop(); // dropping twice is harmless
+
+	assert.throws(() => conn.prepare('SELEC 1'), /^Error: Code: -265 Msg: /);
+    });
+
+    test('multiple result sets', () => {
+	conn.exec('CREATE OR REPLACE PROCEDURE node_test_two_sets() BEGIN SELECT 1 AS a; SELECT 2 AS b, 3 AS c; END');
+	const stmt = conn.prepare('CALL node_test_two_sets()');
+	assert.deepStrictEqual(stmt.exec(), [{ a: 1 }]);
+	assert.deepStrictEqual(stmt.getMoreResults(), [{ b: 2, c: 3 }]);
+	assert.strictEqual(stmt.getMoreResults(), undefined);
+	stmt.drop();
+	conn.exec('DROP PROCEDURE node_test_two_sets');
+    });
+
+    test('errors while fetching rows are reported', () => {
+	assert.throws(() => conn.exec(`SELECT CAST(v AS INT) AS x FROM (
+	    SELECT row_num, CASE WHEN row_num = 50 THEN 'x' ELSE '1' END AS v
+	    FROM sa_rowgenerator(1, 100)) t ORDER BY row_num`), /^Error: Code: -157 Msg: /);
+    });
+
+    test('commit and rollback', () => {
+	conn.exec('CREATE TABLE #tx (id INT)');
+	conn.exec('INSERT INTO #tx VALUES (1)');
+	conn.commit();
+	conn.exec('INSERT INTO #tx VALUES (2)');
+	conn.rollback();
+	assert.deepStrictEqual(conn.exec('SELECT id FROM #tx'), [{ id: 1 }]);
+    });
+
+    test('invalid arguments', () => {
+	const invalid = /^Error: Code: -2002 Msg: Invalid Arguments$/;
+	assert.throws(() => sa.createConnection(5), invalid);
+	assert.throws(() => conn.exec(), invalid);
+	assert.throws(() => conn.exec(1), invalid);
+	assert.throws(() => conn.exec('SELECT 1', 5), invalid);
+	assert.throws(() => conn.prepare(), invalid);
+	assert.throws(() => conn.commit(1), invalid);
+	assert.throws(() => conn.connect(1, 2), invalid);
+	const stmt = conn.prepare('SELECT 1 AS x');
+	assert.throws(() => stmt.exec(1), invalid);
+	assert.throws(() => stmt.getMoreResults(1), invalid);
+	stmt.drop();
+    });
+
+    test('calls on a closed connection', () => {
+	const c = sa.createConnection(CONN);
+	assert.throws(() => c.exec('SELECT 1'), /^Error: Code: -2001 Msg: Invalid Object$/);
+	assert.throws(() => c.prepare('SELECT 1'), /^Error: Code: -2005 Msg: No Connection Available$/);
+	assert.throws(() => c.commit(), /^Error: Code: -2005 Msg: No Connection Available$/);
+	c.connect();
+	const stmt = c.prepare('SELECT 1 AS x');
+	c.disconnect();
+	assert.throws(() => stmt.exec(), /^Error: Code: -2001 Msg: Invalid Object$/);
+    });
+});
+
+describe('callbacks', opts, () => {
+    test('connect, query and disconnect', async () => {
+	const c = sa.createConnection(CONN);
+	await promisify(c.connect.bind(c))();
+	assert.deepStrictEqual(await promisify(c.exec.bind(c))('SELECT CAST(? AS INT) AS x', [7]),
+			       [{ x: 7 }]);
+
+	const stmt = await promisify(c.prepare.bind(c))('SELECT CAST(? AS VARCHAR(5)) AS x');
+	assert.deepStrictEqual(await promisify(stmt.exec.bind(stmt))(['hi']), [{ x: 'hi' }]);
+	await promisify(stmt.drop.bind(stmt))();
+
+	await promisify(c.commit.bind(c))();
+	await promisify(c.rollback.bind(c))();
+	await promisify(c.disconnect.bind(c))();
+	assert.strictEqual(c.connected(), false);
+    });
+
+    test('callbacks get (err, result)', async () => {
+	const c = sa.createConnection(CONN);
+	const call = (fn, ...args) => new Promise(resolve => fn.call(c, ...args, (...cbArgs) => resolve(cbArgs)));
+
+	let [err, result] = await call(c.exec, 'SELECT 1');
+	assert.match(err.message, /^Code: -2001 Msg: Invalid Object$/);
+	assert.strictEqual(result, undefined);
+
+	assert.deepStrictEqual(await call(c.connect), [undefined, undefined]);
+	assert.deepStrictEqual(await call(c.exec, 'SELECT 1 AS x'), [undefined, [{ x: 1 }]]);
+	[err] = await call(c.exec, 'SELEC 1');
+	assert.match(err.message, /^Code: -265 Msg: /);
+	[err] = await call(c.exec, 'SELECT ? AS x', [true]);
+	assert.match(err.message, /^Code: -2006 Msg: /);
+	[err] = await call(c.connect);
+	assert.match(err.message, /^Code: -2003 Msg: /);
+	assert.deepStrictEqual(await call(c.disconnect), [undefined, undefined]);
+	[err] = await call(c.commit);
+	assert.match(err.message, /^Code: -2005 Msg: /);
+    });
+
+    test('concurrent queries on one connection', async () => {
+	const c = sa.createConnection(CONN);
+	c.connect();
+	const exec = promisify(c.exec.bind(c));
+	const results = await Promise.all(Array.from({ length: 50 }, (_, i) =>
+	    exec('SELECT CAST(? AS INT) AS i, COUNT(*) AS n FROM sa_rowgenerator(1, ?)', [i, i + 1])));
+	results.forEach((rows, i) => assert.deepStrictEqual(rows, [{ i, n: i + 1 }]));
+	c.disconnect();
+    });
+
+    test('parallel connections', async () => {
+	const conns = Array.from({ length: 5 }, () => sa.createConnection(CONN));
+	await Promise.all(conns.map(c => promisify(c.connect.bind(c))()));
+	const rows = await Promise.all(conns.map((c, i) =>
+	    promisify(c.exec.bind(c))('SELECT CAST(? AS INT) AS i', [i])));
+	assert.deepStrictEqual(rows, conns.map((_, i) => [{ i }]));
+	await Promise.all(conns.map(c => promisify(c.disconnect.bind(c))()));
+    });
+});
+
+describe('object lifetime', opts, () => {
+    test('exceptions thrown by callbacks are uncaught exceptions', () => {
+	const res = runScript(`
+	    const c = sa.createConnection(CONN);
+	    c.connect();
+	    process.on('uncaughtException', err => {
+		console.log('caught', err.message);
+		c.disconnect();
+	    });
+	    c.exec('SELECT 1', () => { throw new Error('boom'); });
+	`);
+	assert.strictEqual(res.status, 0, res.stderr);
+	assert.strictEqual(res.stdout, 'caught boom\n');
+    });
+
+    test('garbage collected connections and statements', () => {
+	const res = runScript(`
+	    const tick = () => new Promise(resolve => setImmediate(resolve));
+	    (async () => {
+		// connection collected while a statement still refers to it
+		let c = sa.createConnection(CONN);
+		c.connect();
+		const stmt = c.prepare('SELECT 1 AS x');
+		c = null;
+		for (let i = 0; i < 5; i++) { gc(); await tick(); }
+		try { stmt.exec(); } catch (err) { console.log(err.message); }
+		stmt.drop();
+
+		// objects only referenced by pending callbacks
+		await new Promise((resolve, reject) => {
+		    const c2 = sa.createConnection(CONN);
+		    c2.connect();
+		    c2.prepare('SELECT 2 AS x').exec((err, rows) => {
+			if (err) return reject(err);
+			console.log(JSON.stringify(rows));
+			resolve();
+		    });
+		    gc();
+		});
+
+		// statements collected before their connection free their server
+		// resources: the server allows 50 prepared statements per connection
+		const c3 = sa.createConnection(CONN);
+		c3.connect();
+		for (let round = 0; round < 3; round++) {
+		    for (let i = 0; i < 40; i++) c3.prepare('SELECT 1');
+		    for (let i = 0; i < 5; i++) { gc(); await tick(); }
+		}
+		console.log(JSON.stringify(c3.exec('SELECT 3 AS x')));
+		c3.disconnect();
+	    })().catch(err => { console.error(err); process.exit(1); });
+	`, ['--expose-gc']);
+	assert.strictEqual(res.status, 0, res.stderr);
+	assert.strictEqual(res.stdout, 'Code: -2001 Msg: Invalid Object\n[{"x":2}]\n[{"x":3}]\n');
+    });
+});
