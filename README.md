@@ -162,7 +162,7 @@ conn.exec("INSERT INTO Test VALUES ( ?, ? )", [ [1, 10], [2, 20], [3, 30] ], fun
 });
 ```
 
-When using wide statements, each array must have the same number of elements and the type of the values must be the same in each row. A column can be NULL in every row, but DBCAPI rejects a column that mixes NULL and non-NULL values (error -700, "SQLDA fields inconsistent for a multi-row SQLDA"); insert such rows one at a time.
+When using wide statements, each array must have the same number of elements and the type of the values must be the same in each row, except that any value can be NULL. DBCAPI cannot send a column that mixes NULL and other values in one execution, so such a statement is executed one row at a time, which is slower. If a row fails, the rows before it are rolled back to a savepoint, just as a failing wide statement inserts nothing; with `auto_commit` on or `chained` off every row is committed, so they stay.
 
 ## Prepared Statement Execution
 #### Prepare a Statement
@@ -183,6 +183,8 @@ stmt.exec([16], function(err, rows) {
   console.log("Rows: ", rows);
 });
 ```
+
+DBCAPI can only execute a prepared statement with several rows again if there are more rows than in any earlier execution; otherwise it fails with error -182 ("Not enough fields allocated in SQLDA"). Prepare the statement again, or use `conn.exec()`, for such batches.
 
 #### Fetching multiple result sets
 As of version 1.0.16, you can prepare and execute a batch containing multiple select statements. To do this, you would prepare the multiple select statements and use `stmt.exec()` to fetch the first result set. To fetch the next result set, call `stmt.getMoreResults()`. getMoreResults takes an optional callback function (which takes the same arguments as `exec`), making it asynchronous. The `getMoreResults()` function returns `undefined` (or passes it to the callback function) after the last result set.

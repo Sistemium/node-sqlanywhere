@@ -119,17 +119,51 @@ describe('synchronous calls', opts, () => {
 	assert.throws(() => conn.exec('INSERT INTO #dml (id) VALUES (1)'), /^Error: Code: -193 Msg: /);
     });
 
+    test('wide statements with NULL in some rows', () => {
+	conn.exec('CREATE TABLE #wn (id INT PRIMARY KEY, d DOUBLE NULL, s VARCHAR(20) NULL, b LONG BINARY NULL)');
+	const toRow = ([id, d, s, b]) => ({ id, d, s, b });
+	const rows = [
+	    [1, 1.5, 'a', Buffer.from('a')], [2, null, 'b', null], [3, null, null, null],
+	    [4, 2.5, null, Buffer.from('d')], [5, 3.5, '', Buffer.alloc(0)]];
+	assert.strictEqual(conn.exec('INSERT INTO #wn VALUES (?, ?, ?, ?)', rows), 5);
+	assert.deepStrictEqual(conn.exec('SELECT * FROM #wn ORDER BY id'), rows.map(toRow));
+
+	const ins = conn.prepare('INSERT INTO #wn VALUES (?, ?, ?, ?)');
+	const more = rows.map(([id, ...values]) => [id + 10, ...values]);
+	assert.strictEqual(ins.exec(more), 5);
+	assert.strictEqual(ins.exec([[21, null, 'x', null], [22, 1, null, null]]), 2);
+	ins.drop();
+	assert.deepStrictEqual(conn.exec('SELECT * FROM #wn WHERE id > 10 ORDER BY id'),
+			       [...more, [21, null, 'x', null], [22, 1, null, null]].map(toRow));
+
+	// A failing row undoes the rows before it, as a failing multi-row
+	// execution does
+	assert.throws(() => conn.exec('INSERT INTO #wn (id, s) VALUES (?, ?)', [[30, 'x'], [31, null], [1, 'y']]),
+		      /^Error: Code: -193 Msg: /);
+	assert.deepStrictEqual(conn.exec('SELECT id FROM #wn WHERE id >= 30'), []);
+
+	assert.strictEqual(conn.exec('UPDATE #wn SET s = ? WHERE id = ?', [[null, 1], ['z', 2]]), 2);
+	assert.deepStrictEqual(conn.exec('SELECT id, s FROM #wn WHERE id <= 2 ORDER BY id'),
+			       [{ id: 1, s: null }, { id: 2, s: 'z' }]);
+	assert.throws(() => conn.exec('SELECT ? AS x', [[1], [null]]),
+		      /^Error: Code: -1 Msg: Cannot bind parameters to arrays /);
+    });
+
     test('prepared statements', () => {
 	conn.exec('CREATE TABLE #prep (id INT PRIMARY KEY, s VARCHAR(20))');
 	const ins = conn.prepare('INSERT INTO #prep VALUES (?, ?)');
 	assert.strictEqual(ins.exec([[1, 'a'], [2, 'b']]), 2);
+	// DBCAPI only executes several rows again if there are more of them than
+	// before; as many rows must fail rather than insert just the first one
+	assert.throws(() => ins.exec([[4, 'd'], [5, 'e']]), /^Error: Code: -182 Msg: /);
 	// a single row after a wide insert must not reuse the batch size
 	assert.strictEqual(ins.exec([3, 'c']), 1);
+	assert.strictEqual(ins.exec([[4, 'd'], [5, 'e'], [6, 'f']]), 3);
 	ins.drop();
 
 	const sel = conn.prepare('SELECT id, s FROM #prep WHERE id >= ? ORDER BY id');
-	assert.deepStrictEqual(sel.exec([2]), [{ id: 2, s: 'b' }, { id: 3, s: 'c' }]);
-	assert.deepStrictEqual(sel.exec([3]), [{ id: 3, s: 'c' }]);
+	assert.deepStrictEqual(sel.exec([5]), [{ id: 5, s: 'e' }, { id: 6, s: 'f' }]);
+	assert.deepStrictEqual(sel.exec([6]), [{ id: 6, s: 'f' }]);
 	assert.throws(() => sel.exec(), /^Error: Code: -188 Msg: /);
 	sel.drop();
 	assert.throws(() => sel.exec([1]), /^Error: Code: -2001 Msg: Invalid Object$/);
