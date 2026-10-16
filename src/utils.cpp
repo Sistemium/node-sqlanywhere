@@ -216,7 +216,6 @@ bool BindParams::parseWide( Napi::Array rows )
 void BindParams::addNulls( unsigned num_params )
 /**********************************************/
 {
-    num_parsed = params.size();
     while( params.size() < num_params ) {
 	// Laid out as a parsed NULL, or as a column of NULLs for several rows
 	a_sqlany_bind_param param;

@@ -153,7 +153,9 @@ conn.exec("SELECT * FROM Test WHERE id BETWEEN ? AND ?", [5, 8], function (err, 
 });
 ```
 
-A placeholder without a value is bound as NULL, like a `null` value: `conn.exec("INSERT INTO Test VALUES ( ?, ? )", [1])` inserts NULL into the second column, and so does a statement executed without any values. Earlier versions left such parameters unbound; the server took them as NULL too, but then also inserted NULL for them in later INSERT statements on the connection that did have values, and could crash. A placeholder for an output parameter of a procedure stays unbound when it has no value. Passing more values than there are placeholders is an error.
+A placeholder without a value is bound as NULL, like a `null` value: `conn.exec("INSERT INTO Test VALUES ( ?, ? )", [1])` inserts NULL into the second column, and so does a statement executed without any values. Earlier versions left such parameters unbound; the server took them as NULL too, but then also inserted NULL for them in later INSERT statements on the connection that did have values, and could crash. Passing more values than there are placeholders is an error.
+
+Output parameters of procedures are not returned. A placeholder for an `OUT` parameter is never bound, so a value passed for it is ignored, and an `INOUT` parameter only passes its value into the procedure: `conn.exec("CALL MyProc( ?, ? )", [1, null])` calls `MyProc( IN a INT, OUT b INT )` with `a = 1`. Earlier versions crashed when such a placeholder had a value, and otherwise could call the procedure with NULL for its `IN` parameters. A `CALL` can't be executed for several rows at once, and a procedure that has `OUT` parameters and also returns a result set fails with error -182.
 
 As of version 1.0.16, wide inserts, deletes, and updates are possible by passing in an array of arrays, one per row. For example, the following statement inserts three rows rather than just one:
 

@@ -172,6 +172,10 @@ describe('synchronous calls', opts, () => {
 	const sel = conn.prepare('SELECT id, s FROM #prep WHERE id >= ? ORDER BY id');
 	assert.deepStrictEqual(sel.exec([12]), [{ id: 12, s: 'l' }, { id: 13, s: null }, { id: 14, s: null }]);
 	assert.deepStrictEqual(sel.exec([14]), [{ id: 14, s: null }]);
+	// DBCAPI rejects several rows for a query, which leaves the statement
+	// usable for one row, although it is not reset
+	assert.throws(() => sel.exec([[1], [2]]), /^Error: Code: -1 Msg: Cannot bind parameters to arrays /);
+	assert.deepStrictEqual(sel.exec([14]), [{ id: 14, s: null }]);
 	assert.deepStrictEqual(sel.exec(), []); // id >= NULL
 	sel.drop();
 	assert.throws(() => sel.exec([1]), /^Error: Code: -2001 Msg: Invalid Object$/);
@@ -205,12 +209,51 @@ describe('synchronous calls', opts, () => {
 	assert.deepStrictEqual(conn.exec('SELECT CAST(? AS INT) AS a, CAST(? AS VARCHAR(5)) AS b', [1]),
 			       [{ a: 1, b: null }]);
 	assert.deepStrictEqual(conn.exec('SELECT CAST(? AS INT) AS a'), [{ a: null }]);
+    });
 
-	// A parameter that returns output stays unbound, as DBCAPI would
-	// write the output into the buffer of the NULL
-	conn.exec('CREATE OR REPLACE PROCEDURE node_test_out(IN a INT, OUT b INT) BEGIN SET b = a * 2 END');
-	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [1]), undefined);
-	conn.exec('DROP PROCEDURE node_test_out');
+    test('procedure output parameters', () => {
+	// OUT parameters are never bound, so their values are ignored, and
+	// INOUT ones only pass their value in. Statements used to be reset
+	// before binding, after which DBCAPI took the IN parameters of these
+	// calls for OUT ones: their values were lost, or the process crashed.
+	conn.exec('CREATE TABLE #calls (id INT DEFAULT AUTOINCREMENT PRIMARY KEY, a INT NULL, s VARCHAR(40) NULL)');
+	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_out(IN a INT, OUT b VARCHAR(20))
+	    BEGIN INSERT INTO #calls (a, s) VALUES (a, 'out'); SET b = STRING(a * 2) END`);
+	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_out_first(OUT b INT, IN a INT)
+	    BEGIN INSERT INTO #calls (a, s) VALUES (a, 'out first'); SET b = a END`);
+	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_inout(IN a INT, INOUT c VARCHAR(40), INOUT d INT)
+	    BEGIN INSERT INTO #calls (a, s) VALUES (a, STRING(ISNULL(c, 'null'), '/', ISNULL(d, -1)));
+	    SET c = STRING(c, ' and a longer output'); SET d = d + 1 END`);
+	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [1, 'x'.repeat(20)]), 1);
+	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [2, 5]), 1);
+	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [3, null]), 1);
+	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [4]), 1);
+	assert.strictEqual(conn.exec('CALL node_test_out_first(?, ?)', [null, 5]), 1);
+	// The output of c no longer fails as too long for the input value
+	assert.strictEqual(conn.exec('CALL node_test_inout(?, ?, ?)', [6, 'c', 7]), 1);
+	assert.strictEqual(conn.exec('CALL node_test_inout(?, ?, ?)', [7, null, 8]), 1);
+	assert.strictEqual(conn.exec('CALL node_test_inout(?, ?, ?)', [8]), 1);
+
+	const out = conn.prepare('CALL node_test_out(?, ?)');
+	assert.strictEqual(out.exec([9, 'x']), 1);
+	assert.strictEqual(out.exec([10]), 1);
+	assert.strictEqual(out.exec([11, 'y']), 1);
+	// A CALL can't be executed for several rows at once
+	assert.throws(() => out.exec([[12], [13]]), /^Error: Code: -182 Msg: /);
+	assert.throws(() => out.exec([[12, 'a'], [13, 'b']]), /^Error: Code: -182 Msg: /);
+	assert.strictEqual(out.exec([14]), 1);
+	out.drop();
+	assert.throws(() => conn.exec('CALL node_test_out(?, ?)', [[15], [16]]), /^Error: Code: -182 Msg: /);
+	assert.throws(() => conn.exec('CALL node_test_inout(?, ?, ?)', [[15, 'a', 1], [16, 'b', 2]]),
+		      /^Error: Code: -182 Msg: /);
+
+	assert.deepStrictEqual(conn.exec('SELECT a, s FROM #calls ORDER BY id'), [
+	    { a: 1, s: 'out' }, { a: 2, s: 'out' }, { a: 3, s: 'out' }, { a: 4, s: 'out' },
+	    { a: 5, s: 'out first' }, { a: 6, s: 'c/7' }, { a: 7, s: 'null/8' }, { a: 8, s: 'null/-1' },
+	    { a: 9, s: 'out' }, { a: 10, s: 'out' }, { a: 11, s: 'out' }, { a: 14, s: 'out' }]);
+	for (const proc of ['node_test_out', 'node_test_out_first', 'node_test_inout']) {
+	    conn.exec(`DROP PROCEDURE ${proc}`);
+	}
     });
 
     test('multiple result sets', () => {
@@ -219,6 +262,10 @@ describe('synchronous calls', opts, () => {
 	assert.deepStrictEqual(stmt.exec(), [{ a: 1 }]);
 	assert.deepStrictEqual(stmt.getMoreResults(), [{ b: 2, c: 3 }]);
 	assert.strictEqual(stmt.getMoreResults(), undefined);
+	// executing again, also before all result sets are read
+	assert.deepStrictEqual(stmt.exec(), [{ a: 1 }]);
+	assert.deepStrictEqual(stmt.exec(), [{ a: 1 }]);
+	assert.deepStrictEqual(stmt.getMoreResults(), [{ b: 2, c: 3 }]);
 	stmt.drop();
 	conn.exec('DROP PROCEDURE node_test_two_sets');
     });

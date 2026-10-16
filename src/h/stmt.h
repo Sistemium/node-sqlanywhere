@@ -157,11 +157,12 @@ class StmtObject : public Napi::ObjectWrap<StmtObject>
     std::string				sql;
     /// @internal
     /// A second handle of the statement for executions with several rows,
-    /// prepared on first use and never reset. sqlany_reset() leaves room for
-    /// one row in the SQLDA, and sqlany_set_batch_size() only restores it
-    /// when it has to grow the SQLDA, so a handle that is reset can only
-    /// execute more rows than in any earlier execution (error -182
-    /// otherwise). Single-row executions need the reset, so they use
-    /// sqlany_stmt. Only used while holding the connection mutex.
+    /// prepared on first use. sqlany_set_batch_size() leaves the SQLDA at
+    /// its largest size, which a single-row execution reads in full, and
+    /// only sqlany_reset() shrinks it again. But a handle that is reset can
+    /// only execute more rows than in any earlier execution (error -182
+    /// otherwise), and resetting breaks CALLs with OUT parameters, so no
+    /// handle is reset and sqlany_stmt only executes single rows. Only used
+    /// while holding the connection mutex.
     a_sqlany_stmt			*wide_stmt;
 };

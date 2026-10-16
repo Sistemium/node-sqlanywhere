@@ -81,9 +81,8 @@ class ExecuteTask : public Task {
 	// The server takes a parameter left unbound as NULL, but then keeps
 	// it NULL in later executions on the connection, even of other
 	// statements, and can crash. So missing values are bound as NULL.
-	// This also binds every input parameter of the wide handle again,
-	// which is not reset and would otherwise keep bindings to freed
-	// buffers.
+	// This also binds every input parameter again, as statements are not
+	// reset and would otherwise keep bindings to freed buffers.
 	int num_params = api.sqlany_num_params( sqlany_stmt );
 	if( num_params > 0 ) {
 	    binds.addNulls( num_params );
@@ -95,7 +94,8 @@ class ExecuteTask : public Task {
 	    runRowByRow( conn, sqlany_stmt );
 	    return;
 	}
-	if( wide && stmt_obj != NULL ) {
+	// Even when it fails, so that sqlany_stmt only ever runs single rows
+	if( binds.num_rows > 1 && stmt_obj != NULL ) {
 	    runWide( conn );
 	    return;
 	}
@@ -160,12 +160,14 @@ class ExecuteTask : public Task {
     }
 
     // Executes the statement with num_rows rows of bind parameters from row
-    // first on. On failure sets the error and returns false.
+    // first on. On failure sets the error and returns false. Several rows are
+    // only executed on a statement that is used once.
     bool executeRows( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt,
 		      unsigned first, unsigned num_rows ) {
-	// This also sets the batch size back to 1
-	if( !api.sqlany_reset( sqlany_stmt ) ||
-	    !bindParams( sqlany_stmt, first ) ) {
+	// The statement is not reset: after sqlany_reset(), DBCAPI describes
+	// the IN parameters of a CALL that also has OUT parameters as OUT
+	// ones, so their values would be lost or crash it
+	if( !bindParams( sqlany_stmt, first ) ) {
 	    fail( conn );
 	    return false;
 	}
@@ -192,13 +194,15 @@ class ExecuteTask : public Task {
 		return false;
 	    }
 
-	    // DBCAPI would write the output of a procedure parameter into the
-	    // buffer of the NULL added for it, which has none, so such a
-	    // parameter is left unbound when it has no value
-	    if( binds.isAddedNull( i ) && param.direction != DD_INPUT ) {
+	    // Output of procedures is not returned, and DBCAPI would write it
+	    // into the buffers of the values. So an OUT parameter is never
+	    // bound, ignoring its value, and an INOUT one only passes its value
+	    // in. Never binding it also keeps a statement that is not reset
+	    // from writing into the buffers of an earlier execution.
+	    if( param.direction == DD_OUTPUT ) {
 		continue;
 	    }
-
+	    param.direction = DD_INPUT;
 	    param.value = binds.rowValue( i, first );
 
 	    if( !api.sqlany_bind_param( sqlany_stmt, i, &param ) ) {
