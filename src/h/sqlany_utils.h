@@ -57,9 +57,6 @@ class BindParams {
     // num_params. Called once, after parse().
     void addNulls( unsigned num_params );
 
-    // Whether the value of parameter i was added by addNulls().
-    bool isAddedNull( unsigned i ) const { return i >= num_parsed; }
-
     // The value of parameter i for an execution that starts at row first.
     a_sqlany_data_value rowValue( unsigned i, unsigned first ) const;
 
@@ -73,7 +70,6 @@ class BindParams {
 	std::vector<sacapi_bool>	nulls;
     };
     std::vector<std::unique_ptr<Column>>	columns;
-    size_t				num_parsed = SIZE_MAX;
 
     bool parseWide( Napi::Array rows );
     Column *addColumn( a_sqlany_bind_param &param );
