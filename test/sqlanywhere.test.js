@@ -18,10 +18,11 @@ const CONN = process.env.SQLANY_TEST_CONN;
 const opts = { skip: CONN ? false : 'set SQLANY_TEST_CONN to run' };
 
 // Runs script in a separate node process with the driver as `sa`
-function runScript(script, flags = []) {
+function runScript(script, flags = [], options = {}) {
     const prelude = `const sa = require(${JSON.stringify(path.join(__dirname, '..'))});\n` +
 	`const CONN = ${JSON.stringify(CONN)};\n`;
-    return spawnSync(process.execPath, [...flags, '-e', prelude + script], { encoding: 'utf8' });
+    return spawnSync(process.execPath, [...flags, '-e', prelude + script],
+		     { encoding: 'utf8', ...options });
 }
 
 describe('synchronous calls', opts, () => {
@@ -427,4 +428,21 @@ describe('object lifetime', opts, () => {
 	assert.strictEqual(res.status, 0, res.stderr);
 	assert.strictEqual(res.stdout, 'Code: -2001 Msg: Invalid Object\n[{"x":2}]\n[{"x":3}]\n');
     });
+
+    for (const signal of ['SIGTERM', 'SIGINT']) {
+	test(`${signal} ends a connected process`, () => {
+	    // The driver must turn off the client library's signal handlers
+	    // itself, so the child must not inherit the setting from this process
+	    const env = { ...process.env };
+	    delete env.SA_INSTALL_SIG_HANDLERS;
+	    // A process that ignores the signal spins, and only SIGKILL stops it
+	    const res = runScript(`
+		const c = sa.createConnection(CONN);
+		c.connect();
+		setTimeout(() => {}, 10000); // stay alive until the signal arrives
+		process.kill(process.pid, '${signal}');
+	    `, [], { env, timeout: 5000, killSignal: 'SIGKILL' });
+	    assert.strictEqual(res.signal, signal, res.stderr);
+	});
+    }
 });

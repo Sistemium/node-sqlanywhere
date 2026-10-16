@@ -17,6 +17,11 @@ Since version 2.0.0 the driver is built on [Node-API](https://nodejs.org/api/n-a
 
 At run time the driver loads the SQL Anywhere client library `libdbcapi_r.so` (Linux), `libdbcapi.dylib` (macOS) or `dbcapi.dll` (Windows). Run `sa_config.sh` from the SQL Anywhere installation (or set `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` yourself) so that it can be found. The library must match the architecture of the `node` binary: SQL Anywhere 17 for macOS is x86_64 only, so on Apple silicon use an x64 build of Node.js (it runs under Rosetta).
 
+#### Signals
+The SQL Anywhere client library installs its own handlers for SIGTERM, SIGINT and other signals when it is loaded. A Node.js process with these handlers does not exit on SIGTERM or SIGINT (sent by PM2, systemd or Ctrl+C) but spins at 100% CPU until it is killed with SIGKILL. The driver therefore sets `SA_INSTALL_SIG_HANDLERS=N` in `process.env` when it is loaded, unless the variable is already set, so the process exits as usual. Child processes inherit the variable. To keep the client library's handlers, set `SA_INSTALL_SIG_HANDLERS` to another value before loading the driver.
+
+`process.env` in a worker thread is a copy that does not reach the client library. If you only use the driver in worker threads, also `require('sqlanywhere')` in the main thread, or set the variable in the environment of the process.
+
 Versions supported:
 
 <table border="1">
