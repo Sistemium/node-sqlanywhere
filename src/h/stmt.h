@@ -152,7 +152,4 @@ class StmtObject : public Napi::ObjectWrap<StmtObject>
     Connection				*connection;
     /// @internal
     std::atomic<a_sqlany_stmt *>	sqlany_stmt;
-    /// @internal
-    /// The batch size last set on sqlany_stmt.
-    unsigned				batch_size;
 };

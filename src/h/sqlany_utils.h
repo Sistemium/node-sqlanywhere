@@ -45,9 +45,15 @@ class BindParams {
   public:
     std::vector<a_sqlany_bind_param>	params;
     unsigned				num_rows = 1;
+    // Whether a column of the rows mixes NULL and other values, which
+    // DBCAPI can't bind in one multi-row execution
+    bool				mixed_nulls = false;
 
     // Returns false if arg holds a value that can't be bound.
     bool parse( Napi::Array arg );
+
+    // The value of parameter i for an execution that starts at row first.
+    a_sqlany_data_value rowValue( unsigned i, unsigned first ) const;
 
   private:
     struct Column {
@@ -73,6 +79,10 @@ class ResultSet {
     bool fetch( a_sqlany_connection *	conn,
 		a_sqlany_stmt *		sqlany_stmt,
 		std::string &		error_msg );
+
+    // Sets the total number of rows affected by a statement without a result
+    // set that was executed in several parts.
+    void setAffectedRows( int rows ) { rows_affected = rows > 0 ? rows : -1; }
 
     // Number of affected rows for DML, an array of row objects for queries,
     // undefined otherwise.

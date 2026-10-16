@@ -47,7 +47,7 @@ class ExecuteTask : public Task {
 		fail( JS_ERR_INVALID_OBJECT );
 		return;
 	    }
-	    run( conn, sqlany_stmt, stmt_obj->batch_size );
+	    run( conn, sqlany_stmt );
 	    return;
 	}
 
@@ -60,8 +60,7 @@ class ExecuteTask : public Task {
 	    fail( conn );
 	    return;
 	}
-	unsigned batch_size = 1;
-	run( conn, sqlany_stmt, batch_size );
+	run( conn, sqlany_stmt );
 	api.sqlany_free_stmt( sqlany_stmt );
     }
 
@@ -78,11 +77,48 @@ class ExecuteTask : public Task {
     ResultSet		results;
 
   private:
-    void run( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt,
-	      unsigned &batch_size ) {
-	if( !api.sqlany_reset( sqlany_stmt ) ) {
+    void run( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt ) {
+	if( !binds.mixed_nulls || api.sqlany_num_cols( sqlany_stmt ) > 0 ) {
+	    if( executeRows( conn, sqlany_stmt, 0, binds.num_rows ) &&
+		!results.fetch( conn, sqlany_stmt, error_msg ) ) {
+		err = true;
+	    }
+	    return;
+	}
+
+	// DBCAPI binds NULL with a different type than other values, which the
+	// server rejects in a multi-row execution (error -700), so the rows are
+	// executed one at a time. Rolling back to the savepoint undoes the
+	// earlier rows if one fails, as a failing multi-row execution is
+	// undone. A commit by auto_commit or unchained mode releases the
+	// savepoint, so errors about it not existing are ignored.
+	if( !api.sqlany_execute_immediate( conn, "SAVEPOINT" ) ) {
 	    fail( conn );
 	    return;
+	}
+	int affected = 0;
+	for( unsigned row = 0; row < binds.num_rows; row++ ) {
+	    if( !executeRows( conn, sqlany_stmt, row, 1 ) ) {
+		api.sqlany_execute_immediate( conn, "ROLLBACK TO SAVEPOINT" );
+		return;
+	    }
+	    int rows = api.sqlany_affected_rows( sqlany_stmt );
+	    if( rows > 0 ) {
+		affected += rows;
+	    }
+	}
+	api.sqlany_execute_immediate( conn, "RELEASE SAVEPOINT" );
+	results.setAffectedRows( affected );
+    }
+
+    // Executes the statement with num_rows rows of bind parameters from row
+    // first on. On failure sets the error and returns false.
+    bool executeRows( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt,
+		      unsigned first, unsigned num_rows ) {
+	// This also sets the batch size back to 1
+	if( !api.sqlany_reset( sqlany_stmt ) ) {
+	    fail( conn );
+	    return false;
 	}
 
 	for( unsigned int i = 0; i < binds.params.size(); i++ ) {
@@ -90,34 +126,27 @@ class ExecuteTask : public Task {
 
 	    if( !api.sqlany_describe_bind_param( sqlany_stmt, i, &param ) ) {
 		fail( conn );
-		return;
+		return false;
 	    }
 
-	    memcpy( &param.value, &binds.params[i].value, sizeof( param.value ) );
+	    param.value = binds.rowValue( i, first );
 
 	    if( !api.sqlany_bind_param( sqlany_stmt, i, &param ) ) {
 		fail( conn );
-		return;
+		return false;
 	    }
 	}
 
-	// A prepared statement keeps its batch size between executions
-	if( binds.num_rows != batch_size ) {
-	    if( !api.sqlany_set_batch_size( sqlany_stmt, binds.num_rows ) ) {
-		fail( conn );
-		return;
-	    }
-	    batch_size = binds.num_rows;
+	if( num_rows > 1 && !api.sqlany_set_batch_size( sqlany_stmt, num_rows ) ) {
+	    fail( conn );
+	    return false;
 	}
 
 	if( !api.sqlany_execute( sqlany_stmt ) ) {
 	    fail( conn );
-	    return;
+	    return false;
 	}
-
-	if( !results.fetch( conn, sqlany_stmt, error_msg ) ) {
-	    err = true;
-	}
+	return true;
     }
 };
 

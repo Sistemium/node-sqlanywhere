@@ -148,11 +148,13 @@ bool BindParams::parseWide( Napi::Array rows )
 	// values must be of the same type or null
 	std::vector<Napi::Value> vals;
 	a_sqlany_data_type type = A_INVALID_TYPE;
+	bool has_null = false;
 	for( unsigned r = 0; r < num_rows; r++ ) {
 	    Napi::Value val = row_arrs[r].Get( c );
 	    a_sqlany_data_type val_type;
 	    if( val.IsNull() ) {
 		val_type = A_INVALID_TYPE;
+		has_null = true;
 	    } else if( val.IsNumber() ) {
 		val_type = A_DOUBLE;
 	    } else if( val.IsString() ) {
@@ -171,6 +173,8 @@ bool BindParams::parseWide( Napi::Array rows )
 	}
 	if( type == A_INVALID_TYPE ) {
 	    type = A_STRING;
+	} else if( has_null ) {
+	    mixed_nulls = true;
 	}
 
 	a_sqlany_bind_param param;
@@ -207,6 +211,21 @@ bool BindParams::parseWide( Napi::Array rows )
 	params.push_back( param );
     }
     return true;
+}
+
+a_sqlany_data_value BindParams::rowValue( unsigned i, unsigned first ) const
+/**************************************************************************/
+{
+    a_sqlany_data_value value = params[i].value;
+    if( first > 0 ) {
+	// Multi-row binds hold arrays of doubles or of pointers to the data
+	value.buffer += first * ( value.is_address ? sizeof( char * ) : sizeof( double ) );
+	if( value.length != NULL ) {
+	    value.length += first;
+	}
+	value.is_null += first;
+    }
+    return value;
 }
 
 bool BindParams::parse( Napi::Array arg )
@@ -491,7 +510,6 @@ StmtObject::StmtObject( const Napi::CallbackInfo &info )
     : Napi::ObjectWrap<StmtObject>( info )
     , connection( NULL )
     , sqlany_stmt( NULL )
-    , batch_size( 1 )
 {
 }
 
