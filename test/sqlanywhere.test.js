@@ -217,13 +217,15 @@ describe('synchronous calls', opts, () => {
 	// before binding, after which DBCAPI took the IN parameters of these
 	// calls for OUT ones: their values were lost, or the process crashed.
 	conn.exec('CREATE TABLE #calls (id INT DEFAULT AUTOINCREMENT PRIMARY KEY, a INT NULL, s VARCHAR(40) NULL)');
-	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_out(IN a INT, OUT b VARCHAR(20))
-	    BEGIN INSERT INTO #calls (a, s) VALUES (a, 'out'); SET b = STRING(a * 2) END`);
-	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_out_first(OUT b INT, IN a INT)
-	    BEGIN INSERT INTO #calls (a, s) VALUES (a, 'out first'); SET b = a END`);
-	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_inout(IN a INT, INOUT c VARCHAR(40), INOUT d INT)
-	    BEGIN INSERT INTO #calls (a, s) VALUES (a, STRING(ISNULL(c, 'null'), '/', ISNULL(d, -1)));
-	    SET c = STRING(c, ' and a longer output'); SET d = d + 1 END`);
+	// Parameters must not be named like the columns: SQL Anywhere 16 then
+	// fails the INSERT with -143 "Column 'a' not found"
+	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_out(IN p_a INT, OUT b VARCHAR(20))
+	    BEGIN INSERT INTO #calls (a, s) VALUES (p_a, 'out'); SET b = STRING(p_a * 2) END`);
+	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_out_first(OUT b INT, IN p_a INT)
+	    BEGIN INSERT INTO #calls (a, s) VALUES (p_a, 'out first'); SET b = p_a END`);
+	conn.exec(`CREATE OR REPLACE PROCEDURE node_test_inout(IN p_a INT, INOUT p_c VARCHAR(40), INOUT p_d INT)
+	    BEGIN INSERT INTO #calls (a, s) VALUES (p_a, STRING(ISNULL(p_c, 'null'), '/', ISNULL(p_d, -1)));
+	    SET p_c = STRING(p_c, ' and a longer output'); SET p_d = p_d + 1 END`);
 	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [1, 'x'.repeat(20)]), 1);
 	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [2, 5]), 1);
 	assert.strictEqual(conn.exec('CALL node_test_out(?, ?)', [3, null]), 1);
