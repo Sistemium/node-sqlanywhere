@@ -78,20 +78,60 @@ class ExecuteTask : public Task {
 
   private:
     void run( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt ) {
-	if( !binds.mixed_nulls || api.sqlany_num_cols( sqlany_stmt ) > 0 ) {
-	    if( executeRows( conn, sqlany_stmt, 0, binds.num_rows ) &&
-		!results.fetch( conn, sqlany_stmt, error_msg ) ) {
-		err = true;
-	    }
+	// DBCAPI fails to execute several rows of a statement with a result set
+	bool wide = binds.num_rows > 1 && api.sqlany_num_cols( sqlany_stmt ) == 0;
+	if( wide && binds.mixed_nulls ) {
+	    runRowByRow( conn, sqlany_stmt );
 	    return;
 	}
+	// The wide handle is not reset, so a parameter that isn't bound again
+	// would keep its binding to the buffers of an earlier execution
+	if( wide && stmt_obj != NULL &&
+	    binds.params.size() >= (size_t)api.sqlany_num_params( sqlany_stmt ) ) {
+	    runWide( conn );
+	    return;
+	}
+	if( executeRows( conn, sqlany_stmt, 0, binds.num_rows ) &&
+	    !results.fetch( conn, sqlany_stmt, error_msg ) ) {
+	    err = true;
+	}
+    }
 
-	// DBCAPI binds NULL with a different type than other values, which the
-	// server rejects in a multi-row execution (error -700), so the rows are
-	// executed one at a time. Rolling back to the savepoint undoes the
-	// earlier rows if one fails, as a failing multi-row execution is
-	// undone. A commit by auto_commit or unchained mode releases the
-	// savepoint, so errors about it not existing are ignored.
+    // Executes all rows on the wide handle of the prepared statement.
+    void runWide( a_sqlany_connection *conn ) {
+	a_sqlany_stmt *wide_stmt = stmt_obj->wide_stmt;
+	if( wide_stmt == NULL ) {
+	    wide_stmt = api.sqlany_prepare( conn, stmt_obj->sql.c_str() );
+	    if( wide_stmt == NULL ) {
+		fail( conn );
+		return;
+	    }
+	    stmt_obj->wide_stmt = wide_stmt;
+	}
+
+	// The batch size goes first, so that DBCAPI never takes the new
+	// parameters for as many rows as an earlier execution had
+	if( !api.sqlany_set_batch_size( wide_stmt, binds.num_rows ) ||
+	    !bindParams( wide_stmt, 0 ) ) {
+	    fail( conn );
+	    return;
+	}
+	if( !api.sqlany_execute( wide_stmt ) ) {
+	    fail( conn );
+	    return;
+	}
+	if( !results.fetch( conn, wide_stmt, error_msg ) ) {
+	    err = true;
+	}
+    }
+
+    // DBCAPI binds NULL with a different type than other values, which the
+    // server rejects in a multi-row execution (error -700), so the rows are
+    // executed one at a time. Rolling back to the savepoint undoes the
+    // earlier rows if one fails, as a failing multi-row execution is
+    // undone. A commit by auto_commit or unchained mode releases the
+    // savepoint, so errors about it not existing are ignored.
+    void runRowByRow( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt ) {
 	if( !api.sqlany_execute_immediate( conn, "SAVEPOINT" ) ) {
 	    fail( conn );
 	    return;
@@ -116,25 +156,10 @@ class ExecuteTask : public Task {
     bool executeRows( a_sqlany_connection *conn, a_sqlany_stmt *sqlany_stmt,
 		      unsigned first, unsigned num_rows ) {
 	// This also sets the batch size back to 1
-	if( !api.sqlany_reset( sqlany_stmt ) ) {
+	if( !api.sqlany_reset( sqlany_stmt ) ||
+	    !bindParams( sqlany_stmt, first ) ) {
 	    fail( conn );
 	    return false;
-	}
-
-	for( unsigned int i = 0; i < binds.params.size(); i++ ) {
-	    a_sqlany_bind_param 	param;
-
-	    if( !api.sqlany_describe_bind_param( sqlany_stmt, i, &param ) ) {
-		fail( conn );
-		return false;
-	    }
-
-	    param.value = binds.rowValue( i, first );
-
-	    if( !api.sqlany_bind_param( sqlany_stmt, i, &param ) ) {
-		fail( conn );
-		return false;
-	    }
 	}
 
 	if( num_rows > 1 && !api.sqlany_set_batch_size( sqlany_stmt, num_rows ) ) {
@@ -145,6 +170,25 @@ class ExecuteTask : public Task {
 	if( !api.sqlany_execute( sqlany_stmt ) ) {
 	    fail( conn );
 	    return false;
+	}
+	return true;
+    }
+
+    // Binds the parameters of the rows from row first on. Returns false on
+    // failure, leaving the error with the connection.
+    bool bindParams( a_sqlany_stmt *sqlany_stmt, unsigned first ) {
+	for( unsigned int i = 0; i < binds.params.size(); i++ ) {
+	    a_sqlany_bind_param 	param;
+
+	    if( !api.sqlany_describe_bind_param( sqlany_stmt, i, &param ) ) {
+		return false;
+	    }
+
+	    param.value = binds.rowValue( i, first );
+
+	    if( !api.sqlany_bind_param( sqlany_stmt, i, &param ) ) {
+		return false;
+	    }
 	}
 	return true;
     }
@@ -317,8 +361,8 @@ Napi::Value Connection::exec( const Napi::CallbackInfo &info )
 
 class PrepareTask : public Task {
   public:
-    PrepareTask( Connection *obj, StmtObject *stmt_obj, const std::string &sql )
-	: obj( obj ), stmt_obj( stmt_obj ), sql( sql ) {}
+    PrepareTask( Connection *obj, StmtObject *stmt_obj )
+	: obj( obj ), stmt_obj( stmt_obj ) {}
 
     void execute() override {
 	std::lock_guard<std::mutex> lock( obj->conn_mutex );
@@ -329,7 +373,7 @@ class PrepareTask : public Task {
 	    return;
 	}
 
-	a_sqlany_stmt *sqlany_stmt = api.sqlany_prepare( conn, sql.c_str() );
+	a_sqlany_stmt *sqlany_stmt = api.sqlany_prepare( conn, stmt_obj->sql.c_str() );
 	if( sqlany_stmt == NULL ) {
 	    fail( conn );
 	    return;
@@ -344,7 +388,6 @@ class PrepareTask : public Task {
   private:
     Connection		*obj;
     StmtObject		*stmt_obj;
-    std::string		sql;
 };
 
 Napi::Value Connection::prepare( const Napi::CallbackInfo &info )
@@ -368,13 +411,13 @@ Napi::Value Connection::prepare( const Napi::CallbackInfo &info )
     Napi::Object stmt = StmtObject::NewInstance( env );
     StmtObject *obj = StmtObject::Unwrap( stmt );
     obj->connection = this;
+    obj->sql = info[0].As<Napi::String>().Utf8Value();
     {
 	std::lock_guard<std::mutex> lock( conn_mutex );
 	statements.push_back( obj );
     }
 
-    std::unique_ptr<Task> task(
-	new PrepareTask( this, obj, info[0].As<Napi::String>().Utf8Value() ) );
+    std::unique_ptr<Task> task( new PrepareTask( this, obj ) );
     return runTask( info, std::move( task ), callback, { stmt } );
 }
 

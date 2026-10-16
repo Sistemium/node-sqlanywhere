@@ -184,7 +184,7 @@ stmt.exec([16], function(err, rows) {
 });
 ```
 
-DBCAPI can only execute a prepared statement with several rows again if there are more rows than in any earlier execution; otherwise it fails with error -182 ("Not enough fields allocated in SQLDA"). Prepare the statement again, or use `conn.exec()`, for such batches.
+A prepared statement that is executed with several rows at once is prepared a second time on the server for those executions, so it counts twice towards the limit of prepared statements per connection (the `max_statement_count` option).
 
 #### Fetching multiple result sets
 As of version 1.0.16, you can prepare and execute a batch containing multiple select statements. To do this, you would prepare the multiple select statements and use `stmt.exec()` to fetch the first result set. To fetch the next result set, call `stmt.getMoreResults()`. getMoreResults takes an optional callback function (which takes the same arguments as `exec`), making it asynchronous. The `getMoreResults()` function returns `undefined` (or passes it to the callback function) after the last result set.
